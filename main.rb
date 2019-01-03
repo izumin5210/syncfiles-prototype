@@ -61,6 +61,22 @@ class GithubClient
     end
   end
 
+  def merge(slug:, ref:, pull:)
+    begin
+      cfg = fetch_config(slug, ref: ref)
+      branch = "syncfiles/#{slug}/#{pull}"
+      cfg[:files].each do |file|
+        file[:dests].each do |dest|
+          prs = @client.pull_requests(slug, state: :open, head: branch, sort: :created, direction: :desc)
+          next if prs.empty?
+          @client.merge_pull_request(slug, prs[0][:number])
+        end
+      end
+    rescue Syncfiles::NotFound
+      nil
+    end
+  end
+
   private
 
   def fetch_config(slug, ref:)
@@ -158,6 +174,14 @@ post '/webhook' do
         pull: params[:number],
         ref:  params[:pull_request][:head][:ref],
         sha:  params[:pull_request][:head][:sha],
+      )
+    when :closed
+      return unless params[:pull_request][:merged]
+      slug = params[:repository][:full_name]
+      GithubClient.new(access_token: datastore.token_for(slug: slug)).merge(
+        slug: slug,
+        pull: params[:number],
+        ref:  params[:pull_request][:head][:ref],
       )
     end
   end
