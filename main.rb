@@ -3,6 +3,9 @@ Bundler.require
 
 require 'active_support'
 require 'active_support/core_ext'
+require 'active_model'
+require_relative './lib/active_model/attributes/model'
+require_relative './config'
 
 module Syncfiles
   class NotFound < StandardError; end
@@ -50,10 +53,10 @@ class GithubClient
   def sync(slug:, ref:, pull:, sha:)
     begin
       cfg = fetch_config(slug, ref: ref)
-      cfg[:files].each do |file|
-        content = fetch_entry(slug, file[:src][:path], ref: ref).content
-        file[:dests].each do |dest|
-          sync_file(slug: dest[:repo], path: dest[:path], content: content, src_repo_slug: slug, src_pull: pull, src_ref: ref, src_sha: sha)
+      cfg.entries.each do |entry|
+        content = fetch_entry(slug, entry.src.path, ref: ref).content
+        entry.dests.each do |dest|
+          sync_file(slug: dest.repo, path: dest.path, content: content, src_repo_slug: slug, src_pull: pull, src_ref: ref, src_sha: sha)
         end
       end
     rescue Syncfiles::NotFound
@@ -65,11 +68,11 @@ class GithubClient
     begin
       cfg = fetch_config(slug, ref: ref)
       branch = "syncfiles/#{slug}/#{pull}"
-      cfg[:files].each do |file|
-        file[:dests].each do |dest|
-          prs = @client.pull_requests(slug, state: :open, head: branch, sort: :created, direction: :desc)
+      cfg.entries.each do |entry|
+        entry.dests.each do |dest|
+          prs = @client.pull_requests(dest.repo, state: :open, head: branch, sort: :created, direction: :desc)
           next if prs.empty?
-          @client.merge_pull_request(slug, prs[0][:number])
+          @client.merge_pull_request(dest.repo, prs[0][:number])
         end
       end
     rescue Syncfiles::NotFound
@@ -81,7 +84,7 @@ class GithubClient
 
   def fetch_config(slug, ref:)
     content = fetch_entry(slug, '.syncfiles.yml', ref: ref).content
-    YAML.load(content).with_indifferent_access
+    Config.new(YAML.load(content))
   rescue Octokit::NotFound => e
     pp e
     raise Syncfiles::NotFound
