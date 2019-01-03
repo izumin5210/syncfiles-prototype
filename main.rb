@@ -4,6 +4,119 @@ Bundler.require
 require 'active_support'
 require 'active_support/core_ext'
 
+module Syncfiles
+  class NotFound < StandardError; end
+end
+
+class Datastore
+  PATH = 'data.json'
+
+  def initialize
+    @data = JSON.parse(open(PATH).read).with_indifferent_access
+  rescue Errno::ENOENT
+    @data = {
+      tokens: {},
+      pulls: {},
+    }.with_indifferent_access
+    save
+  end
+
+  def token_for(slug:)
+    @data.dig(:tokens, slug, :token)
+  end
+
+  def set_token(token, slug:)
+    @data[:tokens][slug] ||= {}
+    @data[:tokens][slug][:token] = token
+    save
+  end
+
+  private
+
+  def save
+    open(PATH, 'w') do |f|
+      f.puts JSON.pretty_generate(@data)
+    end
+  end
+end
+
+class GithubClient
+  Entry = Struct.new(:path, :content, :sha, keyword_init: true)
+
+  def initialize(access_token:)
+    @client = Octokit::Client.new(access_token: access_token)
+  end
+
+  def sync(slug:, ref:, pull:, sha:)
+    begin
+      cfg = fetch_config(slug, ref: ref)
+      cfg[:files].each do |file|
+        content = fetch_entry(slug, file[:src][:path], ref: ref).content
+        file[:dests].each do |dest|
+          sync_file(slug: dest[:repo], path: dest[:path], content: content, src_repo_slug: slug, src_pull: pull, src_ref: ref, src_sha: sha)
+        end
+      end
+    rescue Syncfiles::NotFound
+      nil
+    end
+  end
+
+  private
+
+  def fetch_config(slug, ref:)
+    content = fetch_entry(slug, '.syncfiles.yml', ref: ref).content
+    YAML.load(content).with_indifferent_access
+  rescue Octokit::NotFound => e
+    pp e
+    raise Syncfiles::NotFound
+  end
+
+  def fetch_entry(slug, path, ref: 'master')
+    resp = @client.contents(slug, path: path, ref: ref)
+    Entry.new(
+      path:    resp.path,
+      content: Base64.decode64(resp.content),
+      sha:     resp.sha,
+    )
+  rescue Octokit::NotFound => e
+    pp e
+    raise Syncfiles::NotFound
+  end
+
+  def sync_file(slug:, path:, content:, src_repo_slug:, src_pull:, src_ref:, src_sha:)
+    repo = @client.repository(slug)
+    branch = "syncfiles/#{src_repo_slug}/#{src_pull}"
+    title = "Sync #{path} from #{src_repo_slug}"
+    body = "from https://github.com/#{src_repo_slug}/pull/#{src_pull}"
+    msg = [title, "\n", "from https://github.com/#{src_repo_slug}/commit/#{src_sha}"].join("\n")
+
+    new_pull = false
+
+    begin
+      @client.ref(slug, "heads/" + branch)
+    rescue Octokit::NotFound
+      new_pull = true
+      @client.create_ref(
+        slug,
+        "heads/" + branch,
+        @client.ref(slug, "heads/" + repo.default_branch).object.sha,
+      )
+    end
+
+    begin
+      dest_entry = fetch_entry(slug, path, ref: branch)
+      return if content == dest_entry.content
+      @client.update_contents(slug, path, msg, dest_entry.sha, content, branch: branch)
+    rescue Syncfiles::NotFound
+      @client.create_contents(slug, path, msg, content, branch: branch)
+    end
+
+    if new_pull
+      @client.create_pull_request(slug, repo.default_branch, branch, title, body)
+    end
+  end
+end
+
 private_pem = File.read(ENV['GITHUB_APP_PRIVATE_KEY_PATH'])
 private_key = OpenSSL::PKey::RSA.new(private_pem)
 # Generate the JWT
@@ -18,113 +131,33 @@ payload = {
 
 jwt = JWT.encode(payload, private_key, "RS256")
 
-db = {
-  tokens: {},
-  pulls: {},
-}
-
-module Syncfiles
-  class NotFound < StandardError; end
-end
-
-class GithubClient
-  def initialize(access_token:, db:)
-    @client = Octokit::Client.new(access_token: access_token)
-    @db = db
-  end
-
-  def repository(slug)
-    @client.repository(slug)
-  end
-
-  def fetch_config(slug, ref:)
-    content = self.fetch_content(slug, '.syncfiles.yml', ref: ref)
-    YAML.load(content).with_indifferent_access
-  rescue Octokit::NotFound => e
-    pp e
-    raise Syncfiles::NotFound
-  end
-
-  def fetch_content(slug, path, ref: 'master')
-    resp = @client.contents(slug, path: path, ref: ref)
-    Base64.decode64(resp.content)
-  rescue Octokit::NotFound => e
-    pp e
-    raise Syncfiles::NotFound
-  end
-
-  def sync(slug:, ref:, pull:)
-    begin
-      cfg = fetch_config(slug, ref: ref)
-      cfg[:files].each do |file|
-        content = fetch_content(slug, file[:src][:path], ref: ref)
-        file[:dests].each do |dest|
-          sync_file(slug: dest[:repo], path: dest[:path], content: content, src_repo_slug: slug, src_pull: pull)
-        end
-      end
-    rescue Syncfiles::NotFound
-      nil
-    end
-  end
-
-  private
-
-  def db
-    @db
-  end
-
-  def sync_file(slug:, path:, content:, src_repo_slug:, src_pull:)
-    repo = @client.repository(slug)
-    branch = "syncfiles/#{src_repo_slug}/#{src_pull}"
-    db[:pulls][src_repo_slug] ||= {}
-    db[:pulls][src_repo_slug][src_pull] ||= {}
-    title = "Sync #{path} from #{src_repo_slug}"
-    body = "from https://github.com/#{src_repo_slug}/pull/#{src_pull}"
-    msg = [title, "\n", body].join("\n")
-
-    if db[:pulls][src_repo_slug][src_pull].key? slug
-      pull = @client.pull_requsets(slug, db[:pulls][src_repo_slug][src_pull])
-      dest_content = self.fetch_content(slug, path, ref: pull.head.ref)
-      return if content == dest_content
-      @client.update_contents(slug, path, msg, content, branch: branch)
-    else
-      begin
-        dest_content = self.fetch_content(slug, path)
-        return if content == dest_content
-      rescue Syncfiles::NotFound
-        @client.create_ref(
-          slug,
-          "heads/" + branch,
-          @client.ref(slug, "heads/" + repo.default_branch).object.sha,
-        )
-        @client.create_contents(slug, path, msg, content, branch: branch)
-        resp = @client.create_pull_request(slug, repo.default_branch, branch, title, body)
-        db[:pulls][src_repo_slug][src_pull][slug] = resp.number
-      end
-    end
-  end
-end
+datastore = Datastore.new
 
 post '/webhook' do
   params = JSON.parse(request.body.read).with_indifferent_access
   case request.env['HTTP_X_GITHUB_EVENT']&.to_sym
   when :installation
-    c = Octokit::Client.new(bearer_token: jwt)
-    resp = c.create_app_installation_access_token(
-      params[:installation][:id],
-      accept: 'application/vnd.github.machine-man-preview+json',
-    )
-    params[:repositories].each do |repo|
-      db[:tokens][repo[:full_name]] = { token: resp.token, expired_at: resp.expired_at }
+    case params[:action].to_sym
+    when :created
+      c = Octokit::Client.new(bearer_token: jwt)
+      resp = c.create_app_installation_access_token(
+        params[:installation][:id],
+        accept: 'application/vnd.github.machine-man-preview+json',
+      )
+      params[:repositories].each do |repo|
+        datastore.set_token(resp.token, slug: repo[:full_name])
+      end
+    when :deleted
     end
   when :pull_request
     case params[:action].to_sym
     when :opened, :synchronize
       slug = params[:repository][:full_name]
-      GithubClient.new(access_token: db[:tokens][slug][:token], db: db).sync(
+      GithubClient.new(access_token: datastore.token_for(slug: slug)).sync(
         slug: slug,
         pull: params[:number],
         ref:  params[:pull_request][:head][:ref],
+        sha:  params[:pull_request][:head][:sha],
       )
     end
   end
