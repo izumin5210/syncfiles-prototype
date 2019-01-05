@@ -11,7 +11,7 @@ module Github
   class Branch < Struct.new(:name, :ref, :sha, :new_branch, keyword_init: true)
     def self.from_ref(ref, name: nil, new_branch: false)
       new(
-        name:       ame.precense || ref.gsub(%r!^refs/heads/!, ''),
+        name:       name.presence || ref.gsub(%r!^refs/heads/!, ''),
         ref:        ref.ref,
         sha:        ref.object.sha,
         new_branch: new_branch,
@@ -94,12 +94,32 @@ module Github
       repo = find_repository(slug)
       ref = @client.create_ref(
         slug,
-        "heads/" + branch,
+        "heads/" + branch_name,
         find_branch(slug, repo.default_branch).sha,
       )
       Branch.from_ref(ref, name: branch_name, new_branch: true).tap do |b|
         @branches[slug][branch_name] = b
       end
+    end
+
+    def create_or_update_content(slug, path, content, message:, ref: 'master')
+      begin
+        dest_entry = find_entry(slug, path, ref: ref)
+        if content == dest_entry.content
+          return
+        end
+        @client.update_contents(slug, path, message, dest_entry.sha, content, branch: ref)
+      rescue Github::NotFound
+        @client.create_contents(slug, path, message, content, branch: ref)
+      end
+    end
+
+    def create_pull_request(slug, head, title:, body:, base: nil)
+      if base.blank?
+        repo = @client.find_repository(slug)
+        base = repo.default_branch
+      end
+      resp = @client.create_pull_request(slug, base, head, title, body)
     end
   end
 end

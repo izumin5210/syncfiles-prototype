@@ -7,9 +7,9 @@ class SyncFilesService
     @client = Github::Client.new(access_token: @datastore.token_for(slug: slug))
 
     begin
-      cfg = @client.find_config(slug, ref: pr.branch)
+      cfg = @client.find_config(slug, ref: pr.branch.ref)
       cfg.entries.each do |entry|
-        content = @client.find_entry(slug, entry.src.path, ref: ref).content
+        content = @client.find_entry(slug, entry.src.path, ref: pr.branch.ref).content
         entry.dests.each do |dest|
           sync_file(dest: dest, content: content, src_slug: slug, src_pr: pr)
         end
@@ -22,24 +22,16 @@ class SyncFilesService
   private
 
   def sync_file(dest:, content:, src_slug:, src_pr:)
-    repo = @client.repository(dest.repo)
-    branch = "syncfiles/#{src_slug}/pull/#{pr.number}"
+    branch = "syncfiles/#{src_slug}/pull/#{src_pr.number}"
     title = "Sync #{dest.path} from #{src_slug}"
     body = "from https://github.com/#{src_slug}/pull/#{src_pr.number}"
     msg = [title, "\n", "from https://github.com/#{src_slug}/commit/#{src_pr.number}"].join("\n")
 
     branch = @client.find_or_create_branch(dest.repo, branch)
-
-    begin
-      dest_entry = @client.find_entry(dest.repo, dest.path, ref: branch)
-      return if content == dest_entry.content
-      @client.update_contents(dest.repo, dest.path, msg, dest_entry.sha, content, branch: branch)
-    rescue NotFound
-      @client.create_contents(dest.repo, dest.path, msg, content, branch: branch)
-    end
+    @client.create_or_update_content(dest.repo, dest.path, content, message: msg, ref: branch.ref)
 
     if branch.new_branch?
-      @client.create_pull_request(dest.repo, repo.default_branch, branch, title, body)
+      @client.create_pull_request(dest.repo, branch.name, title: title, body: body)
     end
   end
 end
