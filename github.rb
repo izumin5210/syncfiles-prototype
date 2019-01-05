@@ -52,12 +52,14 @@ module Github
       content = find_entry(slug, '.syncfiles.yml', ref: ref).content
       Config.new(YAML.load(content))
     rescue Octokit::NotFound => e
+      Syncfiles.logger.debug "#{slug}@#{ref} does not have .syncfiles.yml"
       raise NotFound.new(e)
     end
 
     def find_repository(slug)
       @repositories[slug] ||= @client.repository(slug)
     rescue Octokit::NotFound => e
+      Syncfiles.logger.debug "Repository #{slug} does not exist"
       raise NotFound.new(e)
     end
 
@@ -74,6 +76,7 @@ module Github
           )
         end
     rescue Octokit::NotFound => e
+      Syncfiles.logger.debug "#{slug}@#{ref} does not have #{path}"
       raise NotFound.new(e)
     end
 
@@ -85,6 +88,7 @@ module Github
           Branch.from_ref(ref, name: branch_name)
         end
     rescue Octokit::NotFound => e
+      Syncfiles.logger.debug "#{slug} does not have #{branch_name} branch"
       raise NotFound.new(e)
     end
 
@@ -97,6 +101,7 @@ module Github
         "heads/" + branch_name,
         find_branch(slug, repo.default_branch).sha,
       )
+      Syncfiles.logger.debug "#{branch_name} branch was created on #{slug}"
       Branch.from_ref(ref, name: branch_name, new_branch: true).tap do |b|
         @branches[slug][branch_name] = b
       end
@@ -106,11 +111,14 @@ module Github
       begin
         dest_entry = find_entry(slug, path, ref: ref)
         if content == dest_entry.content
+          Syncfiles.logger.debug "#{slug}@#{branch}:#{dest.path} was not updated"
           return
         end
         @client.update_contents(slug, path, message, dest_entry.sha, content, branch: ref)
+        Syncfiles.logger.debug "#{slug}@#{branch}:#{dest.path} was updated"
       rescue Github::NotFound
         @client.create_contents(slug, path, message, content, branch: ref)
+        Syncfiles.logger.debug "#{slug}@#{branch}:#{dest.path} was created"
       end
     end
 
@@ -120,6 +128,7 @@ module Github
         base = repo.default_branch
       end
       resp = @client.create_pull_request(slug, base, head, title, body)
+      Syncfiles.logger.debug "pull request ##{resp[:number]} was created on #{slug}"
     end
   end
 end

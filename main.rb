@@ -10,6 +10,15 @@ require_relative './datastore'
 require_relative './github'
 Dir['./services/**'].each { |f| require_relative f }
 
+module Syncfiles
+  def self.logger
+    @logger ||=
+      Logger.new(STDOUT).tap do |l|
+        l.level = Logger::DEBUG
+      end
+  end
+end
+
 datastore = Datastore.new
 
 post '/webhook' do
